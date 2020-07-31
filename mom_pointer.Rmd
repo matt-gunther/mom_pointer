@@ -1,0 +1,268 @@
+---
+output: 
+  html_document:
+    css: "./resources/isrdi-common.1.6.css"
+    includes:
+       in_header: "./resources/myheader.html"
+---
+
+```{r setup, include=FALSE, eval = T}
+library(ipumsPMA)
+options(tibble.max_extra_cols = 5)
+samples <- c("bf2018a_nh", "ke2018a_nh")
+dat <- readRDS("dat.rds")
+bf2018 <- dat$bf2018a_nh
+```
+
+
+<!--#include virtual="/pma/_inc/gtm-body.htm" -->
+<header>
+<!--#include virtual="/pma/_inc/top-nav.htm" -->  
+
+<!--#include virtual="/pma/_inc/picture-bar.htm" -->
+</header>
+::: {#content}
+<!--#include virtual="/pma/_inc/menu-left.htm" -->
+
+::: {#main role="main"}
+<!-- BEGIN PLACING PAGE CONTENT -->
+
+# MATCHING RECORDS IN 2018 PMA NUTRITION SURVEYS
+## How to Create a Pointer Variable With Functional Programming in R
+
+The Performance Monitoring for Action [2018  nutrition survey module for Burkina Faso and Kenya](https://pma.ipums.org/pma/sample_notes.shtml#nut) features hundreds of indicators measuring diet and nutritional status for children under age 5 and women aged 10-49. While the survey is not expressly designed to capture relationships between sampled individuals living together in the same household, there may be certain research contexts in which these relationships are key. 
+
+For example, each woman aged 10-49 who gave birth to a living child within 2 years prior to the survey was given a series of questions related to the antenatal care and nutritional assistance she received during her most recent pregnancy. If the child from that pregnancy was also included in the nutrition sample, it may be possible for researchers to link the mother and child together. Such connections could be used to determine whether certain types of antenatal interventions referenced on the female questionnaire ultimately improve nutritional outcomes for children after birth. 
+
+In the 2018 data, a match between mother and child can be made 1) if they each reside in the same household `HHID`, and 2) if the date of the woman's most recent birth `LASTBIRTHMO` and `LASTBIRTHYR` is the same as the birth date of the child `KIDBIRTHMO` and `KIDBIRTHYR`. Both criteria can be used together in a function creating a user-generated variable representing a match between mother and child. 
+
+For R users, the most concise approach to building a function like this one comes from the functional programming toolkit, [`purrr`](https://purrr.tidyverse.org/), imported with the package [`tidyverse`](https://www.tidyverse.org/) (STATA users: check out our example using `egen` at the end of this post). Here, the `purrr` function [`pmap_chr`](https://purrr.tidyverse.org/reference/map2.html) iterates over each record in the Burkina Faso 2018 dataset, applying our match criteria to create a new pointer variable, `MOMID`. This new variable contains the `PERSONID` associated with a child's mother if a match has been found.
+
+### Load libraries and import data from the IPUMS PMA website
+```{r, eval = F}
+library(tidyverse)
+library(ipumsr)
+bf2018 <- read_ipums_micro(ddi = "pma_00001.xml")
+```
+The loaded libraries include:
+
+* `tidyverse`, which attaches `purrr` and other packages needed to use the "tidy" syntax used in this example. See [tidyverse.org](https://www.tidyverse.org/) for a full list of imported packages.
+* `ipumsr`, which includes the function `read_ipums_micro` used to import both the dataset and its associated codebook downloaded from [pma.ipums.org](https://pma.ipums.org) (see [the `ipumsr` notes on CRAN](https://cran.r-project.org/web/packages/ipumsr/vignettes/ipums.html) for detailed instructions). In this example, our extract includes *only* the sample "Burkina Faso 2018 Round 2 Nutrition", along with all of the variables used below (available under the "NUTRITION - PERSON" unit of analysis).
+
+Note: the file `pma_00001.xml` should be in your R working directory, or else its full path should be specified.
+
+### Matching by household and birth date with `pmap`
+```{r, eval=T}
+bf2018 <- bf2018%>%
+  mutate(MOMID = case_when(ELIGTYPE < 20 ~ pmap_chr(
+    bf2018%>%
+      select(HHID,
+             KIDBIRTHYR,
+             KIDBIRTHMO,
+             LASTBIRTHYR,
+             LASTBIRTHMO), 
+    function(...){
+      kid <- tibble(...)
+      sameYr <- which(LASTBIRTHYR == kid$KIDBIRTHYR)
+      sameMo <- which(LASTBIRTHMO == kid$KIDBIRTHMO)
+      sameHH <- which(HHID == kid$HHID)
+      mom <- intersect(intersect(sameYr, sameMo), sameHH)
+      if(length(mom)==1){ 
+        return(PERSONID[mom])
+      }else{
+        return(NA)
+      }
+    }
+  )))
+```
+
+The variable `MOMID` is created in several steps:
+
+* `mutate` creates the variable `MOMID`.
+* `case_when` assigns `NA` to `MOMID`, except in defined cases.
+* `MOMID` cases are defined only for children, indicated by `ELIGTYPE < 20`.
+* `pmap_chr` iterates through each of those cases, looking for data within a certain group of variables: `HHID`, `KIDBIRTHYR`, `KIDBIRTHMO`, `LASTBIRTHYR`, and `LASTBIRTHMO`. (The variant `pmap_chr` returns a character vector, rather than a list, which is returned by the base function `pmap`).
+* `function(...)` creates an unnamed function; we could list the variables in the parentheses again here, but using `...` passes them to the function automatically.
+* `kid <- tibble(...)` creates a tibble data structure that resembles the larger dataset, but includes only one child in each iteration of the function. Using `...` again here efficiently passes only the variables we selected above.
+* `sameYr <- which(LASTBIRTHYR == kid$KIDBIRTHYR)` finds all records where the variable for "most recent birth-year" `LASTBIRTHYR` holds the same value as the child's birth-year `kid$KIDBIRTHYR`.
+* `sameMo <- which(LASTBIRTHMO == kid$KIDBIRTHMO)` finds all records where the variable for "most recent birth-month" `LASTBIRTHMO` holds the same value as the child's birth-month `kid$KIDBIRTHMO`.
+* `sameHH <- which(HHID == kid$HHID)` finds all records where the "household identification number" `HHID` matches the number on the child's record `kid$HHID`.
+* `mom` includes the row index for all records where a match was found in each `sameYr`, `sameMo`, and `sameHH`. If there is only one such person `if(length(mom)==1)`, they must be the child's mother, and her identification number is returned as the child's `MOMID` with `return(PERSONID[mom])`. If there were no matches, or if there were two or more possible matches, the child's `MOMID` must be `NA`.   
+  
+### Which children were linked to a mother's record?
+To check our results, create a binary indicator `LINKED` that shows whether each record is a child linked to a mother via `MOMID`. 
+```{r, eval=T}
+bf2018%>%
+  mutate(LINKED = case_when(
+    is.na(MOMID) ~ "no",
+    !is.na(MOMID) ~ "yes"
+  ))%>%
+  group_by(ELIGTYPE, LINKED)%>%
+  count()
+```
+In total, 796 children were linked to a mother: this is only about 28% of the 2856 children listed by the grouping variable `ELIGTYPE`. 
+
+Why were so few children matched successfully? Part of the answer has to do with the nutrition sample design: in Burkina Faso, women aged 10-49 were included from just 45% of households selected at random from the household screening sample (in the Kenya 2018 sample, 25% of households were randomly selected). Meanwhile, children under age 5 from all households were selected for the nutrition sample. As a result, we might estimate that only around 45% of children could possibly be linked to mother included in the nutrition sample:
+
+```{r, eval = T}
+bf2018%>%
+  mutate(MOMS_IN_HH = case_when(ELIGTYPE < 20 ~ pmap_chr(
+    bf2018%>%
+      select(HHID, ELIGTYPE), 
+    function(...){
+      kid <- tibble(...)
+      sameHH <- which(HHID == kid$HHID & ELIGTYPE == 20)
+      if(length(sameHH)>0){return("yes")}else{return("no")}
+    }
+  )))%>%
+  group_by(ELIGTYPE, MOMS_IN_HH)%>%
+  count()
+```
+This confirms our estimate: only 1277 of the 2856 sampled children live in a household with a woman aged 10-49 who was also included in the nutrition sample. In other words, 45% of sampled children live in a household with a sampled mother. Our search found matches for 28% of all children, but this reflects 62% of the children who live in a household with a sampled mother.
+
+Fortunately, because households were randomly selected for the female nutrition sample, we should have no reason to suspect that the 796 children matched to mothers by our search criteria represent a biased sub-sample of the 2856 children overall. However, before proceeding with further analysis, it would be worthwhile to see if we can increase the number of linked children with additional search criteria.
+
+
+### An Expanded Search for Additional Cases
+In the example above, the use of `LASTBIRTHMO` and `LASTBIRTHYR` ensured that only mother's *most recent child* could be linked to her record. 
+
+It's possible to expand these criteria in certain circumstances using `RELATEKID`, which describes the relationship between each child and the person who provided responses to the interviewer on their behalf. When `RELATEKID == 1`, *this respondent is the child's mother*. So, if `RELATEKID == 1` *and only one woman in the child's household has ever given birth*, we should identify that person as the child's mother.
+
+```{r, eval = T}
+bf2018 <- bf2018%>%
+  mutate(MOMID = case_when(
+    ELIGTYPE < 20 ~ pmap_chr(
+      bf2018%>%
+        select(
+          HHID,
+          KIDBIRTHYR,
+          KIDBIRTHMO,
+          LASTBIRTHYR,
+          LASTBIRTHMO,
+          RELATEKID
+        ), 
+      function(...){
+        kid <- tibble(...)
+        sameYr <- which(LASTBIRTHYR == kid$KIDBIRTHYR)
+        sameMo <- which(LASTBIRTHMO == kid$KIDBIRTHMO)
+        sameHH <- which(HHID == kid$HHID)
+        mom <- intersect(intersect(sameYr, sameMo), sameHH)
+        all_moms <- which(LASTBIRTHYR < 9000)
+        moms_in_hh <- intersect(sameHH, all_moms)
+        if(length(mom)==1){ 
+          return(PERSONID[mom])
+        }
+        else if(length(moms_in_hh) == 1 & kid$RELATEKID == 1){
+          return(PERSONID[moms_in_hh])
+        }
+        else{
+          return(NA)
+        }
+      }
+    )
+  ))
+```
+
+This is the same function as before, but with a few additions:
+
+* `RELATEKID` is also selected in the first argument of `pmap_chr`
+* `all_moms <- which(LASTBIRTHYR < 9000)` finds all women who have ever given birth (values above 9000 are codes for different types of missing data, rather than years)
+* `moms_in_hh <- intersect(sameHH, all_moms)` finds the women in `all_moms` who live in the child's household
+* `else if(length(moms_in_hh) == 1 & kid$RELATEKID == 1)` establishes an additional criterion for children who were not linked in the example above: if there is only one possible mother in the child's household `mom_in_hh`, and if the respondent for the child `kid$RELATEKID` was their mother, that mother's identification number is returned as the child's `MOMID` with `return(PERSONID[mom])`
+
+### How many additional children were linked?
+```{r, eval = T}
+bf2018%>%
+  mutate(LINKED = case_when(
+    is.na(MOMID) ~ "no",
+    !is.na(MOMID) ~ "yes"
+  ))%>%
+  group_by(ELIGTYPE, LINKED)%>%
+  count()
+```
+
+With these expanded search criteria, 1079 children were matched to a mother's record: an improvement by 283 cases. Because only 1277 children in the nutrition sample live with a sampled mother, we have now established almost 85% of the possible links between mothers and children. *However, these additional 283 cases should be used with some degree of caution*: they represent children from smaller households compared to the remaining 15% of linkable children who, for the most part, live in households where more two or more mothers reside together. Further analysis should determine whether and how the selection of these smaller households might bias the social and economic composition of our sub-sample.
+
+### Replicating in STATA
+In STATA, we can reproduce these results with the function `egen` (although users should note that, without a direct analogue to `pmap`, this script ran for us in just under an hour):
+```
+*Step1
+bys hhid: egen housesize = max(lineno)
+levelsof hhid, local(household)
+gen momid = ""
+foreach x in `household' {
+	local i = 1
+	levelsof housesize if hhid == "`x'", local(j)
+	while `i' <= `j' {
+	bys hhid: replace momid = personid[`i'] if lastbirthyr[`i'] == kidbirthyr & lastbirthmo[`i'] == kidbirthmo
+	local i = `i' + 1
+	}
+}
+
+
+*Step 2
+
+gen flag = 1 if lastbirthyr < 9000
+bys hhid: egen moms_in_hh = count(flag)
+bys hhid: egen housesize = max(lineno)
+levelsof hhid, local(household)
+gen momid = ""
+foreach x in `household' {
+	local i = 1
+	levelsof housesize if hhid == "`x'", local(j)
+	while `i' <= `j' {
+	bys hhid: replace momid = personid[`i'] if lastbirthyr[`i'] == kidbirthyr & lastbirthmo[`i'] == kidbirthmo & relatekid == 1
+	bys hhid: replace momid = personid[`i'] if relatekid == 1 & moms_in_hh == 1 & flag[`i'] == 1
+	local i = `i' + 1
+	}
+}
+gen linked = 1 if momid != ""
+```
+
+### Next steps
+With the pointer variable `MOMID`, it's now possible to begin exploring the relationship between different types of antenatal intervention and nutritional outcomes for the children in our sample. For example, among those women who received any type of antenatal care for a pregnancy in the last two years, the variable `RPFEEDINFO` indicates whether she was specifically given instructions about how to feed her newborn child as a part of that care. Another variable, `KIDMEASTOLD`, reports what, if anything, health providers have mentioned about a living child's growth & malnourishment.
+
+```{r, eval = T}
+bf2018 <- bf2018%>%
+  mutate(RPFEEDINFO_M = pmap_int(
+      bf2018%>%
+        select(
+          MOMID, 
+          PERSONID, 
+          RPFEEDINFO
+        ), 
+      function(...){
+        kid <- tibble(...)
+        if(is.na(kid$MOMID)){return(NA)}
+        else{
+          mom <- which(PERSONID == kid$MOMID)
+          return(RPFEEDINFO[mom])
+        }
+      }
+    )
+  )
+  
+attributes(bf2018$RPFEEDINFO_M) <- attributes(bf2018$RPFEEDINFO)
+
+bf2018%>%
+  filter(KIDMEASTOLD < 90)%>%
+  group_by(RPFEEDINFO_M, KIDMEASTOLD)%>%
+  count()%>%
+  print(n=Inf)
+```
+
+Here, a new variable `RPFEEDINFO_M` is created on the child's record: it points to the value for `RPFEEDINFO` on their mother's record (the line `attributes(bf2018$RPFEEDINFO_M) <- attributes(bf2018$RPFEEDINFO)` ensures that it has the same value labels). 
+
+In this simple example, it appears that, among children whose linked mother received *no* information about newborn feeding during her pregnancy, over 9% were later diagnosed with poor growth / malnourishment. By comparison, among children whose linked mother *did* receive this information, only about 2% were later diagnosed with poor growth / malnourishment.
+
+We hope this post has been helpful! Let us know how you plan to use this pointer variable or ask us questions by email at [ipums@umn.edu](mailto:ipums@umn.edu), or tweeting us @[ipums](https://twitter.com/ipums).
+
+<!-- END PLACING PAGE CONTENT -->
+:::
+
+<!--#include virtual="/pma/_inc/supported-by.htm" -->
+:::
+
+<footer>
+<!--#include virtual="/pma/_inc/footer.htm" -->
+</footer>
